@@ -1,0 +1,413 @@
+<roblox version="4">
+  <Item class="Lighting" referent="0">
+    <Properties>
+      <string name="Name">Lighting</string>
+      <Color3 name="Ambient">
+        <R>0</R>
+        <G>0</G>
+        <B>0</B>
+      </Color3>
+      <float name="Brightness">2</float>
+      <bool name="GlobalShadows">true</bool>
+      <bool name="Outlines">false</bool>
+      <token name="Technology">1</token>
+    </Properties>
+  </Item>
+  <Item class="ReplicatedStorage" referent="1">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="Folder" referent="2">
+      <Properties>
+        <string name="Name">Shared</string>
+      </Properties>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
+          <string name="Name">Hello</string>
+          <string name="Source"><![CDATA[return function()
+	print("Hello, world!")
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="4">
+        <Properties>
+          <string name="Name">init.shared</string>
+          <string name="Source"><![CDATA[-- src/shared/init.shared.luau
+-- Shared namespace initializer.
+return {}
+
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="5">
+        <Properties>
+          <string name="Name">rovusEventBus</string>
+          <string name="Source"><![CDATA[-- src/shared/rovusEventBus.lua
+-- Defines a single Replicated event name used by client/server.
+
+local ROVUS_EVENT_BUS = {}
+
+ROVUS_EVENT_BUS.REMOTE_EVENT_NAME = "RovusEventBus"
+
+return ROVUS_EVENT_BUS
+
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="6">
+        <Properties>
+          <string name="Name">rovusTypes</string>
+          <string name="Source"><![CDATA[-- src/shared/rovusTypes.lua
+-- Shared type-like definitions for the ROVUS runtime.
+-- Luau doesn't enforce types at runtime, but these tables act as a contract.
+
+local ROVUS = {}
+
+-- Message schema between client/server.
+-- All messages must include:
+--   id: string
+--   type: string
+--   payload: table
+
+ROVUS.MESSAGE_TYPE = {
+	ENGINE_BOOTSTRAP = "ENGINE_BOOTSTRAP",
+	TASK_REQUEST = "TASK_REQUEST",
+	TASK_ACCEPTED = "TASK_ACCEPTED",
+	TASK_PROGRESS = "TASK_PROGRESS",
+	TASK_RESULT = "TASK_RESULT",
+	TASK_ERROR = "TASK_ERROR",
+}
+
+-- Simple status enums.
+ROVUS.TASK_STATUS = {
+	PENDING = "PENDING",
+	RUNNING = "RUNNING",
+	SUCCEEDED = "SUCCEEDED",
+	FAILED = "FAILED",
+}
+
+return ROVUS
+
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="7">
+        <Properties>
+          <string name="Name">rovusUtil</string>
+          <string name="Source"><![CDATA[-- src/shared/rovusUtil.lua
+-- Small shared utilities.
+
+local ROVUS_UTIL = {}
+
+function ROVUS_UTIL.newId(prefix)
+	prefix = prefix or "rovus"
+	-- Not cryptographically secure; good enough for local session correlation.
+	return prefix .. "_" .. tostring(os.clock()) .. "_" .. tostring(math.random(1, 1e8))
+end
+
+function ROVUS_UTIL.safeString(s, default)
+	if type(s) == "string" and #s > 0 then
+		return s
+	end
+	return default or ""
+end
+
+function ROVUS_UTIL.safeTable(t)
+	if type(t) == "table" then
+		return t
+	end
+	return {}
+end
+
+return ROVUS_UTIL
+
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="8">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Script" referent="9">
+      <Properties>
+        <string name="Name">Server</string>
+        <token name="RunContext">0</token>
+        <string name="Source"><![CDATA[-- src/server/init.server.luau
+
+local RovusServer = require(script.Parent:WaitForChild("rovusServer"))
+local RovusUiServer = require(script:WaitForChild("rovusUi.server"))
+
+local CombatServer = require(script.Parent:WaitForChild("Systems"):WaitForChild("Combat"):WaitForChild("CombatServer"))
+
+RovusUiServer.bind()
+RovusServer.bind()
+CombatServer.bind()
+
+
+]]></string>
+      </Properties>
+      <Item class="Folder" referent="10">
+        <Properties>
+          <string name="Name">Systems</string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="11">
+        <Properties>
+          <string name="Name">rovusServer</string>
+          <string name="Source"><![CDATA[-- src/server/rovusServer.lua
+-- Server-side bootstrap for ROVUS.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Types = require(ReplicatedStorage.Shared.rovusTypes)
+local Util = require(ReplicatedStorage.Shared.rovusUtil)
+local EventBus = require(ReplicatedStorage.Shared.rovusEventBus)
+
+local RovusServer = {}
+
+local function ensureRemoteEvent()
+	local ev = ReplicatedStorage:FindFirstChild(EventBus.REMOTE_EVENT_NAME)
+	if ev and ev:IsA("RemoteEvent") then
+		return ev
+	end
+
+	ev = Instance.new("RemoteEvent")
+	ev.Name = EventBus.REMOTE_EVENT_NAME
+	ev.Parent = ReplicatedStorage
+	return ev
+end
+
+function RovusServer.bind()
+	local remote = ensureRemoteEvent()
+
+	-- Broadcast bootstrap to all clients.
+	remote:FireAllClients({
+		id = Util.newId("boot"),
+		type = Types.MESSAGE_TYPE.ENGINE_BOOTSTRAP,
+		payload = {
+			version = 1,
+			message = "ROVUS runtime bootstrapped",
+		},
+	})
+
+	remote.OnServerEvent:Connect(function(player, message)
+		message = type(message) == "table" and message or {}
+		local mType = message.type
+		local payload = type(message.payload) == "table" and message.payload or {}
+
+		-- Keep this strictly non-executable: no dynamic code loading.
+		if mType == Types.MESSAGE_TYPE.TASK_REQUEST then
+			local kind = payload.kind
+
+			if kind == "HELLO" then
+				remote:FireClient(player, {
+					id = Util.newId("task"),
+					type = Types.MESSAGE_TYPE.TASK_ACCEPTED,
+					payload = {
+						status = Types.TASK_STATUS.RUNNING,
+						description = "Handshake accepted",
+					},
+				})
+
+				remote:FireClient(player, {
+					id = Util.newId("task"),
+					type = Types.MESSAGE_TYPE.TASK_RESULT,
+					payload = {
+						status = Types.TASK_STATUS.SUCCEEDED,
+						result = "ROVUS connected",
+					},
+				})
+				return
+			end
+
+			remote:FireClient(player, {
+					id = Util.newId("task"),
+					type = Types.MESSAGE_TYPE.TASK_ERROR,
+					payload = {
+						status = Types.TASK_STATUS.FAILED,
+						error = "Unknown task kind",
+					},
+				})
+			return
+		end
+	end)
+end
+
+return RovusServer
+
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="Script" referent="12">
+        <Properties>
+          <string name="Name">rovusUi</string>
+          <token name="RunContext">0</token>
+          <string name="Source"><![CDATA[-- src/server/rovusUi.server.luau
+-- Minimal UI injection placeholder.
+-- Creates a ScreenGui and a small status label.
+
+local Players = game:GetService("Players")
+
+local RovusUiServer = {}
+
+local function ensureGui(player)
+	local playerGui = player:WaitForChild("PlayerGui")
+	local existing = playerGui:FindFirstChild("RovusGui")
+	if existing then
+		return
+	end
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "RovusGui"
+	gui.ResetOnSpawn = false
+	gui.Parent = playerGui
+
+	local label = Instance.new("TextLabel")
+	label.Name = "StatusLabel"
+	label.BackgroundTransparency = 0.25
+	label.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	label.BorderSizePixel = 0
+	label.TextColor3 = Color3.fromRGB(230, 230, 230)
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = 18
+	label.Text = "ROVUS: connecting..."
+	label.Size = UDim2.fromOffset(360, 40)
+	label.Position = UDim2.new(0, 12, 0, 12)
+	label.Parent = gui
+end
+
+function RovusUiServer.bind()
+	Players.PlayerAdded:Connect(function(player)
+		ensureGui(player)
+	end)
+
+	-- Also handle already-connected players.
+	for _, player in ipairs(Players:GetPlayers()) do
+		pcall(function()
+			ensureGui(player)
+		end)
+	end
+end
+
+return RovusUiServer
+
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="SoundService" referent="13">
+    <Properties>
+      <string name="Name">SoundService</string>
+      <bool name="RespectFilteringEnabled">true</bool>
+    </Properties>
+  </Item>
+  <Item class="StarterPlayer" referent="14">
+    <Properties>
+      <string name="Name">StarterPlayer</string>
+    </Properties>
+    <Item class="StarterPlayerScripts" referent="15">
+      <Properties>
+        <string name="Name">StarterPlayerScripts</string>
+      </Properties>
+      <Item class="LocalScript" referent="16">
+        <Properties>
+          <string name="Name">Client</string>
+          <string name="Source"><![CDATA[-- src/client/init.client.luau
+
+local RovusClient = require(script.Parent:WaitForChild("rovusClient"))
+RovusClient.bind()
+
+]]></string>
+        </Properties>
+        <Item class="ModuleScript" referent="17">
+          <Properties>
+            <string name="Name">rovusClient</string>
+            <string name="Source"><![CDATA[-- src/client/rovusClient.lua
+-- Client-side bootstrap for ROVUS.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RovusEventBus = ReplicatedStorage:WaitForChild("RovusEventBus")
+
+local Types = require(game.ReplicatedStorage.Shared.rovusTypes)
+local Util = require(game.ReplicatedStorage.Shared.rovusUtil)
+
+local RovusClient = {}
+
+function RovusClient.bind()
+	-- Always handle events defensively.
+	RovusEventBus.OnClientEvent:Connect(function(message)
+		message = type(message) == "table" and message or {}
+		local mType = message.type
+
+		if mType == Types.MESSAGE_TYPE.ENGINE_BOOTSTRAP then
+			-- For now, only log. Later this drives UI + task orchestration.
+			print("[ROVUS] Engine bootstrap received")
+			return
+		end
+
+		if mType == Types.MESSAGE_TYPE.TASK_PROGRESS then
+			print("[ROVUS] Task progress:", message.payload and message.payload.status)
+			return
+		end
+
+		if mType == Types.MESSAGE_TYPE.TASK_RESULT then
+			print("[ROVUS] Task result received")
+			return
+		end
+
+		if mType == Types.MESSAGE_TYPE.TASK_ERROR then
+			print("[ROVUS] Task error:", message.payload and message.payload.error)
+			return
+		end
+	end)
+
+	-- Proactively notify the server that the client is alive.
+	-- (This is safe and doesn't execute arbitrary code.)
+	RovusEventBus:FireServer({
+			id = Util.newId("client"),
+			type = Types.MESSAGE_TYPE.TASK_REQUEST,
+			payload = {
+				kind = "HELLO",
+			},
+	})
+end
+
+return RovusClient
+
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="Workspace" referent="18">
+    <Properties>
+      <string name="Name">Workspace</string>
+      <bool name="FilteringEnabled">true</bool>
+      <bool name="NeedsPivotMigration">false</bool>
+    </Properties>
+    <Item class="Part" referent="19">
+      <Properties>
+        <string name="Name">Baseplate</string>
+        <bool name="Anchored">true</bool>
+        <Color3uint8 name="Color3uint8">6512483</Color3uint8>
+        <bool name="Locked">true</bool>
+        <Vector3 name="Position">
+          <X>0</X>
+          <Y>-10</Y>
+          <Z>0</Z>
+        </Vector3>
+        <Vector3 name="size">
+          <X>512</X>
+          <Y>20</Y>
+          <Z>512</Z>
+        </Vector3>
+      </Properties>
+    </Item>
+  </Item>
+</roblox>
